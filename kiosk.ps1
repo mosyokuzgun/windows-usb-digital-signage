@@ -1,5 +1,3 @@
-param([string]$HedefSurucu = "J")
-
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 $HataTercihi = 'SilentlyContinue'
@@ -22,6 +20,11 @@ if (-not ([System.Management.Automation.PSTypeName]'PencereYoneticisi').Type) {
 
 $geciciHtmlYolu = "$env:TEMP\kiosk_oynatici.html"
 $ArananEtiket = "ku2gun" 
+$YerelMedyaDizini = "C:\KioskMedyaDeposu"
+
+if (-not (Test-Path $YerelMedyaDizini)) {
+    New-Item -ItemType Directory -Path $YerelMedyaDizini -Force | Out-Null
+}
 
 $htmlSablonu = @'
 <!DOCTYPE html>
@@ -123,50 +126,78 @@ medyayiOynat(0);
 '@
 
 while ($true) {
-    $bulunanBirim = Get-Volume -ErrorAction SilentlyContinue | Where-Object { $_.FileSystemLabel -eq $ArananEtiket }
+    $bulunanBirim = $null
+    foreach ($surucu in [System.IO.DriveInfo]::GetDrives()) {
+        try {
+            if ($surucu.IsReady -and $surucu.VolumeLabel -eq $ArananEtiket) {
+                $bulunanBirim = $surucu
+                break
+            }
+        } catch {}
+    }
 
-    if (-not $bulunanBirim) {
+    $usbTakiliMi = $false
+    $surucuHarfi = $null
+
+    if ($bulunanBirim) {
+        $surucuHarfi = $bulunanBirim.Name
+        $usbTakiliMi = $true
+        Write-Host "[BASARILI] USB tespit edildi, yerel diske senkronize ediliyor..." -ForegroundColor Green
+        
+        $desteklenenUzantilar = @('.mp4','.avi','.mkv','.mov','.wmv','.jpg','.jpeg','.png','.bmp')
+        
+        Get-ChildItem -Path $YerelMedyaDizini -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        
+        Get-ChildItem -Path $surucuHarfi -File -ErrorAction SilentlyContinue | Where-Object { 
+            $desteklenenUzantilar -contains $_.Extension.ToLower() 
+        } | ForEach-Object {
+            $hedefYol = Join-Path $YerelMedyaDizini $_.Name
+            Copy-Item -Path $_.FullName -Destination $hedefYol -Force -ErrorAction SilentlyContinue
+            Write-Host "[KOPYALANDI] $($_.Name)" -ForegroundColor DarkGreen
+        }
+    }
+
+    $mevcutYerelDosyalar = Get-ChildItem -Path $YerelMedyaDizini -File -ErrorAction SilentlyContinue
+    
+    if ($mevcutYerelDosyalar.Count -eq 0) {
         Write-Host "[BEKLEME] '$ArananEtiket' etiketli USB bellek bekleniyor..." -ForegroundColor Yellow
         Start-Sleep -Seconds 3
         continue
     }
 
-    $surucuHarfi = $bulunanBirim.DriveLetter
-    $surucuDizini = "${surucuHarfi}:\"
-    
-    if (-not (Test-Path $surucuDizini)) {
-        Start-Sleep -Seconds 2
-        continue
+    if (-not $usbTakiliMi) {
+        Write-Host "[BILGI] USB takili degil, yerel depodaki son icerikler oynatiliyor..." -ForegroundColor DarkCyan
     }
-
-    Write-Host "[BASARILI] Dogru USB ($surucuDizini) tespit edildi, medya taraniyor..." -ForegroundColor Green
     
     $desteklenenUzantilar = @('.mp4','.avi','.mkv','.mov','.wmv','.jpg','.jpeg','.png','.bmp')
     $bugununTarihi = Get-Date
+    $medyaDosyalari = @()
     
-    $medyaDosyalari = Get-ChildItem -Path $surucuDizini -File | Where-Object { 
-        $desteklenenUzantilar -contains $_.Extension.ToLower() 
-    } | ForEach-Object {
-        $dosya = $_
-        $dosyaAdi = $_.Name
-        
-        if ($dosyaAdi -match '_(\d{4})-(\d{2})-(\d{2})\.') {
-            $yil = [int]$Matches[1]
-            $ay = [int]$Matches[2]
-            $gun = [int]$Matches[3]
-            $sonGecerlilikTarihi = Get-Date -Year $yil -Month $ay -Day $gun -Hour 23 -Minute 59 -Second 59
+    foreach ($dosya in Get-ChildItem -Path $YerelMedyaDizini -File -ErrorAction SilentlyContinue) {
+        if ($desteklenenUzantilar -contains $dosya.Extension.ToLower()) {
+            $dosyaAdi = $dosya.Name
+            $gecerli = $true
             
-            if ($bugununTarihi -gt $sonGecerlilikTarihi) {
-                Write-Host "[ATLANDI] Suresi dolmus dosya: $dosyaAdi" -ForegroundColor DarkGray
-                return 
+            if ($dosyaAdi -match '_(\d{4})-(\d{2})-(\d{2})\.') {
+                $yil = [int]$Matches[1]
+                $ay = [int]$Matches[2]
+                $gun = [int]$Matches[3]
+                $sonGecerlilikTarihi = Get-Date -Year $yil -Month $ay -Day $gun -Hour 23 -Minute 59 -Second 59
+                
+                if ($bugununTarihi -gt $sonGecerlilikTarihi) {
+                    Write-Host "[ATLANDI] Suresi dolmus dosya: $dosyaAdi" -ForegroundColor DarkGray
+                    $gecerli = $false
+                }
+            }
+            
+            if ($gecerli) {
+                $medyaDosyalari += $dosya.FullName
             }
         }
-        
-        $dosya.FullName
     }
     
     if ($medyaDosyalari.Count -eq 0) {
-        Write-Host "[UYARI] $surucuDizini dizininde gecerli/desteklenen medya bulunamadi, bekleniyor..." -ForegroundColor DarkYellow
+        Write-Host "[UYARI] Yerel dizinde gecerli/desteklenen medya bulunamadi, USB bekleniyor..." -ForegroundColor DarkYellow
         Start-Sleep -Seconds 5
         continue
     }
@@ -185,7 +216,7 @@ while ($true) {
     
     $izoleProfilDizini = "$env:TEMP\ChromeKioskProfili"
     if (Test-Path $izoleProfilDizini) {
-        Remove-Item -Path $izoleProfilDizini -Recurse -Force -ErrorAction SilentlyContinue
+        try { Remove-Item -Path $izoleProfilDizini -Recurse -Force -ErrorAction SilentlyContinue } catch {}
     }
     
     $chromeParametreleri = @(
@@ -217,15 +248,19 @@ while ($true) {
         
         $escBasildiMi = [PencereYoneticisi]::GetAsyncKeyState(27) -band 0x8000
         if ($escBasildiMi) {
-            Write-Host "`n[CIKIS] ESC tusuna basildi. Sadece goruntuleme kapatiliyor..." -ForegroundColor Red
+            Write-Host "`n[CIKIS] ESC tusuna basildi. Kiosk modu durduruldu." -ForegroundColor Red
             if (-not $calisanSurec.HasExited) { Stop-Process -Id $calisanSurec.Id -Force }
             
-            Write-Host "[BEKLEME] Yeniden baslatmak icin lutfen mevcut USB bellegi cikarin..." -ForegroundColor Yellow
-            while (Test-Path $surucuDizini) {
+            Write-Host "[BILGI] 3 dakika sonra sistem otomatik olarak yeniden baslatilacak..." -ForegroundColor Yellow
+            $beklemeSuresiSaniye = 180
+            $baslangicZamani = Get-Date
+            
+            while ((Get-Date) - $baslangicZamani -lt [TimeSpan]::FromSeconds($beklemeSuresiSaniye)) {
                 Start-Sleep -Seconds 1
             }
-            Write-Host "[BILGI] Bellek cikarildi. Sistem yeni baglanti icin hazir." -ForegroundColor Green
-            break
+            
+            Write-Host "[BILGI] Sure doldu, kiosk modu yeniden baslatiliyor..." -ForegroundColor Green
+            break 
         }
 
         if ($calisanSurec.HasExited) {
@@ -233,13 +268,30 @@ while ($true) {
             break
         }
 
-        $donguSayaci += 100
-        if ($donguSayaci -ge 1000) {
-            $donguSayaci = 0
-            if (-not (Test-Path $surucuDizini)) {
-                Write-Host "[BILGI] USB bellek cikarildi. Oynatma durduruldu." -ForegroundColor Yellow
+        if (-not $usbTakiliMi) {
+            $anlikKontrol = $null
+            foreach ($surucu in [System.IO.DriveInfo]::GetDrives()) {
+                try {
+                    if ($surucu.IsReady -and $surucu.VolumeLabel -eq $ArananEtiket) {
+                        $anlikKontrol = $surucu
+                        break
+                    }
+                } catch {}
+            }
+            if ($anlikKontrol) {
+                Write-Host "[BILGI] Yeni bir USB bellek tespit edildi! Guncelleme icin yeniden baslatiliyor..." -ForegroundColor Green
                 if (-not $calisanSurec.HasExited) { Stop-Process -Id $calisanSurec.Id -Force }
-                break
+                break 
+            }
+        }
+
+        if ($usbTakiliMi) {
+            $donguSayaci += 100
+            if ($donguSayaci -ge 1000) {
+                $donguSayaci = 0
+                if ($surucuHarfi -and (-not (Test-Path $surucuHarfi))) {
+                    Write-Host "[BILGI] USB bellek cikarildi, yerel depodan oynatmaya devam ediliyor..." -ForegroundColor Yellow
+                }
             }
         }
     }
